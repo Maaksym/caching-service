@@ -1,27 +1,223 @@
 # Caching Service
 
-A Python backend exercise: a FastAPI service that transforms strings, caches
-transformation results, and reuses identifiers for previously generated payloads.
+A FastAPI microservice that transforms two lists of strings, interleaves the
+results, and persists both a transformation cache and generated JSON payload files.
+A Pydantic Settings CLI exercises the API through real HTTP requests.
 
-## Planned behavior
+## Run locally
 
-- `POST /payload` accepts two equally sized lists of strings and returns a payload ID.
-- The transformer converts each string to uppercase.
-- Transformed strings from the two lists are interleaved and joined with `, `.
-- `GET /payload/{id}` returns the generated output.
-- Transformation results and generated payloads persist in SQLite via SQLAlchemy.
-- A CLI uses Pydantic Settings to validate arguments and exercise the service.
-- Automated tests cover the API, cache reuse, and CLI behavior.
-- Docker provides a reproducible way to run the application.
+Requires Python 3.10 or newer. From the repository directory:
 
-## Status
+```bash
+python -m venv .venv
+```
 
-Repository initialized. Implementation and usage instructions will be added
-incrementally.
+Activate the virtual environment:
 
-## Decisions to confirm
+```powershell
+# Windows PowerShell
+.\.venv\Scripts\Activate.ps1
+```
 
-- The task assigns `-h` to both host and help. Reserve `-h` for help and use `--host`
-  for the server URL.
-- Confirm whether generated payloads must be physical files or may be stored in
-  the database. The task mentions files but shows JSON API responses.
+```bash
+# Linux / macOS
+source .venv/bin/activate
+```
+
+Then install and start the service:
+
+```bash
+python -m pip install --constraint requirements.lock -e ".[dev]"
+python -m uvicorn caching_service.api:app --reload
+```
+
+Open [Swagger UI](http://127.0.0.1:8000/docs) to try the endpoints.
+For PyCharm, open this repository directory and select
+`.venv/Scripts/python.exe` as the project interpreter on Windows.
+Run the `uvicorn` module with parameters `caching_service.api:app --reload`
+and the repository directory as its working directory.
+
+If PowerShell prevents activation, use `.\.venv\Scripts\python.exe` and
+`.\.venv\Scripts\cache-cli.exe` directly; activation is optional.
+
+## Run with Docker
+
+```bash
+docker compose up --build
+```
+
+The API is available at `http://127.0.0.1:8000`. A named volume retains the
+SQLite database and payload files across container replacements. The application
+runs as a non-root user. `docker compose down` stops it without deleting its data.
+
+The CLI is included in the image:
+
+```bash
+docker compose exec api cache-cli --input examples/input.json --repeat 3
+```
+
+## API
+
+### Create a payload
+
+`POST /payload` with `Content-Type: application/json`:
+
+```json
+{
+  "list_1": ["first string", "second string", "third string"],
+  "list_2": ["other string", "another string", "last string"]
+}
+```
+
+Response:
+
+```json
+{"id": "<64-character SHA-256 digest>", "cached": false}
+```
+
+A new payload returns **201**. A previously generated output returns **200**
+with `cached: true` and the same identifier. Both responses include a `Location`
+header pointing to the read endpoint.
+
+### Read a payload
+
+`GET /payload/{id}` returns:
+
+```json
+{"output": "FIRST STRING, OTHER STRING, SECOND STRING, ANOTHER STRING, THIRD STRING, LAST STRING"}
+```
+
+`GET /health` checks database connectivity and returns `{"status": "ok"}`.
+
+Unequal list lengths, non-string elements, unknown fields, malformed JSON, and
+invalid identifier formats return **422**. A valid but unknown identifier returns
+**404**. Storage failures return **503**, with diagnostic details in server logs.
+Empty lists are accepted and produce an empty output string.
+
+## CLI
+
+Run in a second terminal while the service is running:
+
+```bash
+cache-cli --host http://127.0.0.1:8000 --input examples/input.json --repeat 3
+cache-cli -i examples/input.json -r 3 -o results.jsonl
+```
+
+Inline JSON, for shells that preserve single-quoted arguments:
+
+```bash
+cache-cli --json '{"list_1":["hello"],"list_2":["world"]}'
+```
+
+For Windows PowerShell, the file and stdin examples avoid native-command JSON
+quoting differences:
+
+```powershell
+Get-Content examples/input.json -Raw | cache-cli -i -
+```
+
+```bash
+# Linux / macOS
+cat examples/input.json | cache-cli -i -
+```
+
+| Argument | Meaning | Default |
+| --- | --- | --- |
+| `--host URL` | HTTP(S) server base URL | `http://127.0.0.1:8000` |
+| `-r`, `--repeat N` | Positive number of POST/GET iterations | `1` |
+| `-i`, `--input FILE` | UTF-8 JSON file, or `-` for stdin | stdin |
+| `-j`, `--json JSON` | Inline input; mutually exclusive with `--input` | unset |
+| `-o`, `--output FILE` | JSON Lines file, or `-` for stdout | stdout |
+| `-h`, `--help` | Usage information | |
+
+Each iteration sends one POST, follows it with one GET, and emits one JSON line:
+
+```json
+{"iteration": 1, "id": "<digest>", "cached": false, "output": "HELLO, WORLD"}
+{"iteration": 2, "id": "<same digest>", "cached": true, "output": "HELLO, WORLD"}
+```
+
+Exit codes are `0` for success, `2` for invalid arguments/input, and `1` for HTTP,
+network, or file errors. Pydantic Settings performs argument parsing and validation;
+the CLI uses the same payload schemas as the API.
+
+## Design
+
+`api.py` validates HTTP requests and delegates to `PayloadService`. Synchronous
+endpoints run blocking SQLAlchemy and file operations in FastAPI's thread pool.
+The application lifespan initializes storage and disposes of the engine on shutdown.
+
+There are two tables:
+
+- `transformations`: `(version, source)` is the primary key; `result` stores the
+  transformer outcome. Exact original strings are cache keys, preserving case and
+  whitespace. Bumping `TRANSFORMER_VERSION` invalidates old transformation results.
+- `payloads`: the SHA-256 digest of the final output is the primary key, with a
+  creation timestamp. The payload itself lives in `data/payloads/{id}.json`.
+
+On POST, the service deduplicates input strings and bulk-loads cached outcomes in
+bounded batches. It calls the transformer only for missing strings, interleaves
+the results in the original list order, and hashes the final output. Identical
+outputs reuse an identifier even when their original inputs differ in case.
+
+SQLite `BEGIN IMMEDIATE` acquires the writer lock **before** looking up the cache.
+Concurrent requests from separate engines/workers therefore cannot both process
+the same uncached string. WAL mode allows reads during writes, and connections wait
+up to 30 seconds for the writer lock.
+
+A new payload is written to a temporary file in its destination directory, flushed,
+and atomically renamed before its database record is committed. GET first checks
+the record, then reads the file and verifies that its content matches the identifier.
+Repeating POST repairs a missing or corrupt file using cached transformations.
+
+Set `CACHE_DATA_DIR` to change the storage directory (default: `./data`):
+
+```powershell
+$env:CACHE_DATA_DIR = 'C:\path\to\data'
+```
+
+```bash
+export CACHE_DATA_DIR=/path/to/data
+```
+
+## Assumptions and tradeoffs
+
+- The sample implies uppercase conversion, so the simulated transformer uses
+  `str.upper()` and is assumed deterministic for a given version.
+- The wording mentions payload files, so the output is an actual JSON file; the
+  transformation cache and payload registry live in SQLite.
+- The task assigns `-h` to both host and help. This implementation reserves `-h`
+  for help and exposes the server through `--host`.
+- Both storage resources must be retained together. Multiple workers may share
+  the same local database and payload directory; this is not a distributed cache.
+- SQLite serializes all POST operations, including transformer calls. That is a
+  deliberate correctness/complexity tradeoff for this small service. A slow real
+  transformer would require a different coordination strategy for higher throughput.
+- A database transaction and a filesystem write cannot form one atomic commit.
+  A crash after file publication but before database commit can leave an unreferenced
+  file; a retry replaces it safely. Database rollback can also cause successful
+  transformations in a failed request to be repeated. There is no exactly-once
+  guarantee across external-service failures or process crashes.
+- Tables are created on startup for the exercise. Production schema changes would
+  use migrations. Cache expiry, eviction, authentication, and request-size quotas
+  are outside this task's scope.
+
+## Checks
+
+```bash
+pytest --cov=caching_service --cov-report=term-missing
+ruff check .
+ruff format --check .
+```
+
+Tests cover the sample output, duplicate strings, overlapping requests, output
+deduplication, ordering, validation, Unicode, empty inputs, persistence after restart,
+concurrent app instances, rollback, atomic file replacement, file recovery, and CLI
+input/output/error handling. Tests use temporary SQLite files and payload directories.
+CLI tests use HTTPX's mock transport and verify both POST and GET requests.
+
+`requirements.lock` pins the tested runtime and development dependencies; `pyproject.toml`
+declares the compatible ranges. GitHub Actions checks Python 3.10 and 3.12 and builds
+the Docker image.
+
+An English video walkthrough outline is in [docs/walkthrough.md](docs/walkthrough.md).
