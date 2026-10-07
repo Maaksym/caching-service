@@ -1,5 +1,7 @@
 # Video walkthrough outline
 
+<!-- Це план відео. Шлях файлів/функцій коротко записано в request-flow-uk.md. -->
+
 Aim for 8-12 minutes. Share your screen with the camera on. Explain the code in
 your own words, and be ready to modify it during the interview.
 
@@ -16,16 +18,18 @@ Start at `create_payload` in `api.py` and use `examples/input.json` as the examp
 
 1. Show `PayloadInput` in `schemas.py`: two lists of strings, equal-length validation,
    and rejection of unexpected fields.
-2. Follow the call into `PayloadService.create` in `service.py`. Explain the
-   `BEGIN IMMEDIATE` writer lock and the race it prevents: two workers checking a
-   missing string at the same time could otherwise both call the transformer.
-3. Show `_transform_strings`: remove duplicate source strings, query cached results
-   in batches, and transform only missing values. Show `transformer.py` and explain
-   why a version is part of the cache key.
+2. Follow `PayloadService.create` in `service.py`: remove duplicate source strings.
+   Show `_cached_payload` and `_load_cached_strings`: read cached transformations
+   without a writer lock, build the output/ID, and check the registry and JSON file.
+   A complete cache hit returns immediately, even while another writer is busy.
+3. For a cache miss, show `write_session` in `database.py`. It acquires SQLite's
+   `BEGIN IMMEDIATE` writer lock. Back in `_transform_strings`, check the cache
+   again before transforming: another worker may have filled it during the wait.
+   Show `transformer.py` and why a version is part of the cache key.
 4. Show `Transformation` in `models.py` and the SQLite setup in `database.py`.
    Explain persistent storage, the composite primary key, and WAL mode.
-5. Return to `create`: show the interleaving, output hash, and lookup of the payload
-   identifier. Different original inputs can share the same ID if their output matches.
+5. Show `_build_payload`: interleave strings and hash the output. Return to `create`
+   for the registry lookup. Different inputs can share an ID if their output matches.
 6. Show `PayloadStore.write` in `storage.py`: temporary file, flush, atomic rename,
    and the database commit afterward. Mention the crash window and orphan-file tradeoff.
 7. Return to the endpoint: explain `201` for a new output, `200` for cache reuse,
@@ -42,11 +46,15 @@ missing or corrupt file without calling the transformer again.
 
 Show `CliSettings`: Pydantic Settings handles parsing, URL validation, positive
 repeat counts, and mutually exclusive input sources. Explain why `-h` means help
-and the host uses `--host`.
+and the host uses `--host`. `env_prefix_target="all"` ensures the alias `--json`
+uses `CACHE_CLI_JSON`; the unrelated environment variable `JSON` is ignored.
 
 Follow `read_input`, `run`, and `main`: read JSON, reuse the API schema, send a POST
 and GET for each iteration, write JSON Lines, and return meaningful exit codes.
 Explain the file, stdin, inline JSON, and output options.
+Show `read_stdin_utf8` and `write_utf8`: read/write UTF-8 bytes directly so Windows
+cp1251/cp1252 text wrappers cannot corrupt Unicode. The pipe producer must send
+UTF-8; `--output` avoids any subsequent re-encoding by the shell.
 
 Optional live command with the service running:
 
@@ -60,6 +68,10 @@ Show tests for repeated requests and the transformer call count, overlapping str
 restart persistence, and concurrency through two separate application engines.
 Explain that the mock counts external-service calls while SQLite and files are real.
 Show rollback and file replacement tests, then CLI tests with `MockTransport`.
+Show `test_cached_payload_does_not_wait_for_slow_writer`: events keep one writer
+inside the transformer while a cached request completes through a second engine.
+For CLI encoding, show the `BytesIO`/`TextIOWrapper` tests that inspect actual bytes,
+plus the tests for prefixed and unrelated JSON environment variables.
 
 ```bash
 pytest --cov=caching_service --cov-report=term-missing
@@ -72,7 +84,9 @@ survives a container restart. Mention the CI checks and dependency constraints.
 
 Be ready to explain these decisions without reading a script:
 
-- Why SQLite is enough for the exercise, and what serialization costs.
+- Why SQLite satisfies the choice of database in the task. The database module is
+  SQLite-specific; moving its lock helper does not add PostgreSQL support.
+- Why cache hits avoid the writer lock, while new/repair requests still serialize.
 - Why the transformer version belongs in the cache key.
 - Why hashing the output deduplicates payloads more broadly than hashing input.
 - Why database and filesystem updates are not one atomic transaction.

@@ -1,3 +1,4 @@
+# Перевірка файлів: невдалий replace не псує старий JSON, cleanup не приховує помилку.
 import hashlib
 from pathlib import Path
 
@@ -10,6 +11,7 @@ from caching_service.storage import PayloadStorageError, PayloadStore
 def test_failed_atomic_replace_preserves_previous_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cleanup_failure: bool
 ) -> None:
+    # monkeypatch імітує збій публікації та, окремо, прибирання .tmp.
     store = PayloadStore(tmp_path)
     payload_id = hashlib.sha256(b"original").hexdigest()
     store.write(payload_id, "original")

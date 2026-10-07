@@ -1,4 +1,5 @@
-# Python
+# Не додаємо до Git локальне середовище, кеші, дані та налаштування редактора.
+# Python: установлені пакети й результати збірки.
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -7,7 +8,7 @@ venv/
 build/
 dist/
 
-# Test and lint artifacts
+# Службові результати тестів, аналізу коду та coverage.
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
@@ -15,7 +16,7 @@ dist/
 .coverage.*
 htmlcov/
 
-# Local configuration and generated data
+# Локальна конфігурація та згенеровані сервером база/JSON.
 .env
 .env.*
 !.env.example
@@ -26,8 +27,11 @@ htmlcov/
 *.sqlite3
 data/
 
-# Editor and operating system files
+# Налаштування редакторів і файли операційної системи.
 .idea/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Локальна шпаргалка українською
+/docs/request-flow-uk.md

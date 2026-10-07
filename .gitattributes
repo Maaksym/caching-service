@@ -1,1 +1,2 @@
+# Текстові файли використовують LF, щоб узгодити Windows і Linux.
 * text=auto eol=lf

@@ -1,5 +1,8 @@
 # Caching Service
 
+<!-- Орієнтир: цей файл пояснює встановлення й запуск, а не виконує код. -->
+[Короткий шлях запиту українською](docs/request-flow-uk.md).
+
 A FastAPI microservice that transforms two lists of strings, interleaves the
 results, and persists both a transformation cache and generated JSON payload files.
 A Pydantic Settings CLI exercises the API through real HTTP requests.
@@ -113,7 +116,9 @@ For Windows PowerShell, the file and stdin examples avoid native-command JSON
 quoting differences:
 
 ```powershell
-Get-Content examples/input.json -Raw | cache-cli -i -
+$OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding = $OutputEncoding
+Get-Content examples/input.json -Raw -Encoding UTF8 | cache-cli -i -
 ```
 
 ```bash
@@ -141,6 +146,17 @@ Exit codes are `0` for success, `2` for invalid arguments/input, and `1` for HTT
 network, or file errors. Pydantic Settings performs argument parsing and validation;
 the CLI uses the same payload schemas as the API.
 
+Files and stdin input use UTF-8. JSON Lines and error messages are emitted as UTF-8
+bytes, independently of the Windows locale. Invalid UTF-8 input fails before HTTP;
+the program producing a pipe must also send UTF-8. Windows PowerShell can re-encode
+native output when using `>`; use `--output results.jsonl` to guarantee a UTF-8 file.
+See [PowerShell character encoding](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_character_encoding?view=powershell-7.5).
+
+Environment settings use the `CACHE_CLI_` prefix, including `CACHE_CLI_JSON` for
+inline input. An unrelated variable named `JSON` is ignored. CLI arguments take
+precedence over environment settings. This alias-prefix behavior requires
+Pydantic Settings 2.15 or newer, as declared in `pyproject.toml`.
+
 ## Design
 
 `api.py` validates HTTP requests and delegates to `PayloadService`. Synchronous
@@ -156,14 +172,17 @@ There are two tables:
   creation timestamp. The payload itself lives in `data/payloads/{id}.json`.
 
 On POST, the service deduplicates input strings and bulk-loads cached outcomes in
-bounded batches. It calls the transformer only for missing strings, interleaves
-the results in the original list order, and hashes the final output. Identical
-outputs reuse an identifier even when their original inputs differ in case.
+bounded batches without acquiring a writer lock. If all transformations, the output
+registry entry, and a valid payload file exist, it returns the cached ID immediately.
+WAL mode lets this read succeed while another request transforms new strings.
 
-SQLite `BEGIN IMMEDIATE` acquires the writer lock **before** looking up the cache.
-Concurrent requests from separate engines/workers therefore cannot both process
-the same uncached string. WAL mode allows reads during writes, and connections wait
-up to 30 seconds for the writer lock.
+Otherwise, `database.write_session` acquires SQLite's writer lock using
+`BEGIN IMMEDIATE`. The service checks transformations again after acquiring the lock:
+another worker might have populated them during the wait. It calls the transformer
+only for values still missing, interleaves the results, and hashes the final output.
+Concurrent writers therefore cannot both process the same uncached string in
+successful requests. Identical outputs reuse an identifier even when their original
+inputs differ in case. Connections wait up to 30 seconds for the writer lock.
 
 A new payload is written to a temporary file in its destination directory, flushed,
 and atomically renamed before its database record is committed. GET first checks
@@ -190,9 +209,13 @@ export CACHE_DATA_DIR=/path/to/data
   for help and exposes the server through `--host`.
 - Both storage resources must be retained together. Multiple workers may share
   the same local database and payload directory; this is not a distributed cache.
-- SQLite serializes all POST operations, including transformer calls. That is a
-  deliberate correctness/complexity tradeoff for this small service. A slow real
-  transformer would require a different coordination strategy for higher throughput.
+- The task allows SQLite or PostgreSQL; this implementation chooses SQLite.
+  Database-specific locking lives in `database.py`. PostgreSQL would require its
+  own configuration and concurrency strategy; it is not supported by this module.
+- Fully cached POSTs do not acquire the writer lock. Requests creating or repairing
+  data still serialize, including transformer calls, and can time out with 503.
+  A slow real transformer would require a different coordination strategy for
+  higher write throughput.
 - A database transaction and a filesystem write cannot form one atomic commit.
   A crash after file publication but before database commit can leave an unreferenced
   file; a retry replaces it safely. Database rollback can also cause successful
@@ -215,6 +238,9 @@ deduplication, ordering, validation, Unicode, empty inputs, persistence after re
 concurrent app instances, rollback, atomic file replacement, file recovery, and CLI
 input/output/error handling. Tests use temporary SQLite files and payload directories.
 CLI tests use HTTPX's mock transport and verify both POST and GET requests.
+Byte-stream tests emulate cp1251/cp1252 wrappers to check UTF-8 stdin/stdout rather
+than just decoded text. Regression tests also check environment-prefix isolation
+and a fully cached POST completing while another engine holds the writer lock.
 
 `requirements.lock` pins the tested runtime and development dependencies; `pyproject.toml`
 declares the compatible ranges. GitHub Actions checks Python 3.10 and 3.12 and builds

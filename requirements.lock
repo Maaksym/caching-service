@@ -1,3 +1,5 @@
+# Точні перевірені версії бібліотек, включно з їхніми залежностями.
+# --constraint обмежує версії; потрібні пакети визначаються pyproject.toml.
 # Exact versions used for development and verification.
 # Install with: pip install -c requirements.lock .[dev]
 annotated-doc==0.0.5

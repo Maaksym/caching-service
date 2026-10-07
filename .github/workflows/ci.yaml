@@ -1,18 +1,22 @@
+# GitHub Actions: після push/подій PR перевіряємо код, тести та збірку образу.
 name: Checks
 
 on:
   push:
   pull_request:
 
+# Workflow читає репозиторій.
 permissions:
   contents: read
 
 jobs:
+  # Однакові перевірки для двох підтримуваних версій Python.
   test:
     runs-on: ubuntu-latest
     strategy:
       matrix:
         python-version: ["3.10", "3.12"]
+    # Завантажити код -> Python -> залежності -> Ruff -> pytest із coverage.
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -25,6 +29,7 @@ jobs:
       - run: ruff format --check .
       - run: pytest --cov=caching_service --cov-report=term-missing
 
+  # Перевіряє Docker build; контейнер у цьому job не запускається.
   docker:
     runs-on: ubuntu-latest
     steps:
