@@ -52,6 +52,7 @@ class CliSettings(BaseSettings):
         return value
 
 
+# Read UTF-8 data from standard input.
 def read_stdin_utf8() -> str:
     # Реальний stdin має байтовий buffer: не декодуємо pipe через Windows cp1251/cp1252.
     buffer = getattr(sys.stdin, "buffer", None)
@@ -61,6 +62,7 @@ def read_stdin_utf8() -> str:
     return sys.stdin.read()
 
 
+# Write UTF-8 text to the selected output.
 def write_utf8(stream: TextIO, value: str) -> None:
     # stdout/stderr і перенаправлення отримують саме UTF-8 незалежно від Windows locale.
     buffer = getattr(stream, "buffer", None)
@@ -72,6 +74,7 @@ def write_utf8(stream: TextIO, value: str) -> None:
         stream.write(value)
 
 
+# Read and validate the CLI input.
 def read_input(settings: CliSettings) -> PayloadInput:
     # --json -> текст аргументу; --input файл -> його вміст; "-" або None -> stdin.
     if settings.json_input is not None:
@@ -84,6 +87,7 @@ def read_input(settings: CliSettings) -> PayloadInput:
     return PayloadInput.model_validate_json(raw)
 
 
+# Send POST and GET requests to the API.
 def run(settings: CliSettings) -> None:
     # Читаємо input до відкриття output, щоб однаковий шлях не стер вхідні дані.
     payload = read_input(settings)
@@ -117,6 +121,7 @@ def run(settings: CliSettings) -> None:
             )
 
 
+# Parse CLI arguments and start the client.
 def main(argv: list[str] | None = None) -> int:
     # Вхід команди cache-cli: розбираємо параметри, запускаємо run(), повертаємо код.
     try:

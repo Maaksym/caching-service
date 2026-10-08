@@ -1,4 +1,4 @@
-# ORM-моделі описують SQLite-таблиці; HTTP-дані описано окремо в schemas.py.
+# SQLAlchemy models for persistent cache data.
 from datetime import datetime, timezone
 
 from sqlalchemy import DateTime, String, Text
@@ -6,26 +6,24 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
 class Base(DeclarativeBase):
-    # Спільна основа: database.py бере опис таблиць із Base.metadata.
     pass
 
 
 class Transformation(Base):
-    # Кеш одного рядка: (версія, оригінал) -> перетворений текст.
+    # Cache one transformed string for a specific transformer version.
     __tablename__ = "transformations"
 
-    # Два primary_key утворюють один складений ключ: одна пара -> один запис.
+    # Version and source together form the cache key.
     version: Mapped[str] = mapped_column(String(64), primary_key=True)
     source: Mapped[str] = mapped_column(Text, primary_key=True)
     result: Mapped[str] = mapped_column(Text)
 
 
 class Payload(Base):
-    # Реєстр готових результатів; сам output лежить у JSON-файлі, а не в цій таблиці.
+    # Store generated payload IDs. The actual output is stored in JSON files.
     __tablename__ = "payloads"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    # Функція default формує час UTC при вставці нового запису.
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )

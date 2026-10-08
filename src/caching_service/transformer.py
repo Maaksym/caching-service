@@ -1,9 +1,10 @@
-# Імітація зовнішньої обробки одного рядка; кешем керує service.py.
-# Якщо змінюємо алгоритм, змінюємо версію, щоб не використовувати старі перетворення.
+# Simulated external transformer.
+# Change this version if the transformation logic changes.
 TRANSFORMER_VERSION = "uppercase-v1"
 
 
+# Transform one string.
 def transform(value: str) -> str:
     """Stand-in for a deterministic external service."""
-    # [POST 4] Наприклад "hello" -> "HELLO"; повертаємо текст назад у service.py.
+    # Example: "hello" becomes "HELLO".
     return value.upper()

@@ -1,5 +1,4 @@
-# Основна логіка: спершу готовий кеш без writer lock, потім запис за потреби.
-# api.py викликає create()/read(); SQLite-транзакціями керує database.py.
+# Main caching and payload generation logic.
 import hashlib
 from collections.abc import Callable
 from itertools import chain
@@ -22,68 +21,80 @@ class PayloadService:
         transformer: Callable[[str], str] = transform,
         transformer_version: str = TRANSFORMER_VERSION,
     ) -> None:
-        # Запам'ятовуємо залежності; обробка запускається пізніше в create().
+        # Store the database, file storage, and transformer for later use.
         self.engine = engine
         self.store = store
         self.transformer = transformer
         self.transformer_version = transformer_version
 
+    # Create a new payload or reuse an existing cached payload.
     def create(self, request: PayloadInput) -> PayloadCreated:
-        # request тут — перевірені списки PayloadInput, а не HTTP Request із api.py.
+        # Combine both lists and remove duplicate strings.
         sources = list(dict.fromkeys(chain(request.list_1, request.list_2)))
-        # [POST 3] Готовий payload читаємо без writer lock, навіть якщо інший POST повільний.
+        # First, try to return the complete payload from cache.
         cached_payload = self._cached_payload(request, sources)
+        # If everything already exists, return it immediately.
         if cached_payload is not None:
             return cached_payload
 
-        # Нові перетворення/ID або ремонт файлу потребують транзакції запису.
+        # If something is missing, open a protected database write transaction.
         with write_session(self.engine) as session:
-            # ПОВТОРНА перевірка під lock: інший запит міг заповнити кеш за час очікування.
+            # Check the cache again and transform only missing strings.
             results = self._transform_strings(session, sources)
-            # [POST 5–6] Формуємо текст і ID з готових перетворень.
+            # Build the final output and create its ID.
             output, payload_id = self._build_payload(request, results)
+            # Check if this complete payload was already created before.
             cached = session.get(Payload, payload_id) is not None
             if not cached:
+                # Save a new payload as a JSON file.
                 self.store.write(payload_id, output)
+                # Save the payload ID in the database.
                 session.add(Payload(id=payload_id))
             else:
                 try:
                     self.store.read(payload_id)
                 except PayloadStorageError:
-                    # Зниклий/пошкоджений файл відновлюємо з уже сформованого output.
+                    # Recreate the JSON file if it is missing or corrupted.
                     self.store.write(payload_id, output)
             response = PayloadCreated(id=payload_id, cached=cached)
-        # write_session підтвердив commit; повертаємо модель в api.py.
+        # Return the payload ID and cache status back to api.py.
         return response
 
+    # Read an existing payload by its ID.
     def read(self, payload_id: str) -> PayloadOutput | None:
-        # [GET 2] Невідомий ID -> None, який api.py перетворить на 404.
+        # Check that the payload ID exists in the database.
         with Session(self.engine) as session:
             if session.get(Payload, payload_id) is None:
                 return None
-        # [GET 3] storage.py читає файл; transformer для GET не потрібний.
+        # Read the saved JSON file. GET never calls the transformer.
         return self.store.read(payload_id)
 
+    # Try to return a fully cached payload without writing to the database.
     def _cached_payload(self, request: PayloadInput, sources: list[str]) -> PayloadCreated | None:
-        # Швидкий шлях лише для повного кешу: всі слова, запис ID і справний JSON.
+        # Try to return a fully cached payload without taking a write lock.
         with Session(self.engine) as session:
+            # Load already transformed strings from SQLite.
             results = self._load_cached_strings(session, sources)
+            # If some strings are missing, the full payload is not cached.
             if len(results) != len(sources):
                 return None
             output, payload_id = self._build_payload(request, results)
+            # Check that the complete payload is registered in the database.
             if session.get(Payload, payload_id) is None:
                 return None
             try:
+                # Check that the payload JSON file also exists and is valid.
                 self.store.read(payload_id)
             except PayloadStorageError:
-                # Ремонт піде звичайним шляхом запису, а не всередині читання.
                 return None
+            # Everything exists, so return the cached payload.
             return PayloadCreated(id=payload_id, cached=True)
 
+    # Load already transformed strings from the cache.
     def _load_cached_strings(self, session: Session, sources: list[str]) -> dict[str, str]:
-        # Читаємо «оригінал -> результат» для поточної версії; нічого не змінюємо.
+        # Load cached source-to-result values for the current transformer version.
         results: dict[str, str] = {}
-        # Порції по 500 обмежують кількість параметрів одного SQL-запиту.
+        # Read large inputs in smaller batches.
         for offset in range(0, len(sources), 500):
             rows = session.scalars(
                 select(Transformation).where(
@@ -94,28 +105,30 @@ class PayloadService:
             results.update((row.source, row.result) for row in rows)
         return results
 
+    # Transform only strings that are missing from the cache.
     def _transform_strings(self, session: Session, sources: list[str]) -> dict[str, str]:
-        # Цей метод викликається під writer lock і спершу заново читає кеш.
+        # Check the cache again after taking the write lock.
         results = self._load_cached_strings(session, sources)
         for source in sources:
+            # Call the transformer only for strings that are not already cached.
             if source not in results:
-                # [POST 4] Лише відсутній рядок передається transform() із transformer.py.
                 result = self.transformer(source)
                 results[source] = result
-                # Запис стане постійним після успішного commit у write_session().
+                # Save the new transformation result in the cache.
                 session.add(
                     Transformation(version=self.transformer_version, source=source, result=result)
                 )
         return results
 
+    # Interleave the transformed strings and create the payload ID.
     @staticmethod
     def _build_payload(request: PayloadInput, results: dict[str, str]) -> tuple[str, str]:
-        # [POST 5] zip дає пари; беремо обидва елементи кожної пари по черзі.
+        # Interleave transformed values from the two input lists.
         output = ", ".join(
             results[value]
             for pair in zip(request.list_1, request.list_2, strict=True)
             for value in pair
         )
-        # [POST 6] Однаковий кінцевий текст завжди дає той самий ID.
+        # The same final output always produces the same SHA-256 ID.
         payload_id = hashlib.sha256(output.encode("utf-8")).hexdigest()
         return output, payload_id

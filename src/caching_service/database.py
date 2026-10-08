@@ -1,4 +1,4 @@
-# Підготовка SQLite при запуску: api.py -> create_database() -> таблиці з models.py.
+# SQLite setup and safe write transaction helpers.
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -9,29 +9,30 @@ from sqlalchemy.orm import Session
 from caching_service.models import Base
 
 
+# Create the SQLite database connection and tables.
 def create_database(path: Path) -> Engine:
-    # Створюємо папку й engine, через який сервіс відкриватиме сесії.
     path.parent.mkdir(parents=True, exist_ok=True)
+    # Create the SQLite database connection.
     engine = create_engine(
         URL.create("sqlite+pysqlite", database=str(path.resolve())),
-        # FastAPI працює з потоками; SQLite чекає блокування до 30 секунд.
         connect_args={"check_same_thread": False, "timeout": 30},
     )
     with engine.begin() as connection:
-        # WAL дозволяє читання, поки інший запит тримає блокування запису.
+        # WAL allows read requests to continue while another request is writing.
         connection.exec_driver_sql("PRAGMA journal_mode=WAL")
-        # Створює відсутні таблиці; не перебудовує старі таблиці як система міграцій.
+        # Create the database tables if they do not exist yet.
         Base.metadata.create_all(connection)
     return engine
 
 
+# Open a safe SQLite write transaction.
 @contextmanager
 def write_session(engine: Engine) -> Iterator[Session]:
-    # Проєкт обрав SQLite; його спеціальний SQL ізольовано тут, а не в бізнес-логіці.
+    # Open a protected SQLite write transaction.
     if engine.dialect.name != "sqlite":
         raise ValueError("This database module supports SQLite only")
     with Session(engine) as session, session.begin():
-        # Після оптимістичного читання сервіс повторить пошук уже під writer lock.
+        # Take the write lock before creating new cache entries.
         session.execute(text("BEGIN IMMEDIATE"))
-        # Успіх -> commit; помилка -> rollback; контекст також закриває сесію.
+        # Commit on success and roll back automatically if an error happens.
         yield session
